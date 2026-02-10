@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workout Timer</title>
+
+<style>
+  body{
+    margin:0;
+    height:100vh;
+    display:flex;
+    flex-direction:column;
+    background:#000;
+    font-family:Arial, Helvetica, sans-serif;
+    padding-bottom:140px; /* space for fixed controls */
+  }
+
+  #clock{
+    position:fixed;
+    top:14px;
+    right:18px;
+    color:#bbb;
+    font-weight:800;
+    font-size:28px;
+    letter-spacing:1px;
+    z-index:10;
+  }
+
+  .center{
+    flex:1;
+    display:grid;
+    grid-template-rows:auto auto auto auto;
+    align-content:center;
+    justify-items:center;
+    gap:8px;
+    padding:18px;
+  }
+
+  #phase{ font-weight:900; font-size:92px; color:#00ff5a; letter-spacing:1px; }
+  #time{
+    font-weight:900;
+    font-size:22vw;
+    color:#00ff5a;
+    font-variant-numeric: tabular-nums;
+    line-height:1;
+  }
+  #set{ font-weight:900; font-size:64px; color:#fff; }
+  #workElapsed{ margin-top:6px; color:#bbb; font-weight:800; font-size:22px; letter-spacing:0.5px; }
+
+  .controls{
+    position:fixed;
+    left:0;
+    right:0;
+    bottom:0;
+    border-top:1px solid #222;
+    padding:14px;
+    background:#050505;
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+    align-items:center;
+    z-index:10;
+  }
+
+  .controls .row{
+    display:flex;
+    gap:12px;
+    flex-wrap:wrap;
+    justify-content:center;
+    align-items:center;
+  }
+
+  label{ color:#bbb; font-size:12px; margin-right:6px; }
+
+  select{
+    width:120px;
+    padding:10px;
+    border-radius:8px;
+    border:1px solid #333;
+    background:#111;
+    color:#fff;
+    font-size:16px;
+    appearance:auto;
+  }
+
+  button{
+    padding:12px 16px;
+    border-radius:8px;
+    border:1px solid #333;
+    background:#222;
+    color:#fff;
+    font-weight:900;
+  }
+  button.primary{ background:#1d4ed8; border-color:#1d4ed8; }
+  button:disabled{ opacity:.4; }
+</style>
+</head>
+
+<body>
+  <div id="clock">--:--</div>
+
+  <div class="center">
+    <div id="phase">READY</div>
+    <div id="time">01:00</div>
+    <div id="set">SET 1 / 5</div>
+    <div id="workElapsed">WORK TIME: 00:00:00</div>
+  </div>
+
+  <div class="controls">
+    <div class="row">
+      <label>Minutes</label>
+      <select id="minutes"></select>
+
+      <label>Seconds</label>
+      <select id="seconds"></select>
+
+      <label>Sets</label>
+      <select id="sets"></select>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="start">START</button>
+      <button id="stop" disabled>STOP</button>
+      <button id="reset">RESET</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ===== Clock =====
+  function updateClock(){
+    const now = new Date();
+    document.getElementById('clock').textContent =
+      now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  // ===== Horn (your horn.wav only) =====
+  // IMPORTANT: If you replace horn.wav, bump this number (v=6, v=7, etc.)
+  const hornUrl = 'horn.wav?v=5';
+
+  async function playHorn(times=1){
+    for(let i=0;i<times;i++){
+      const a = new Audio(hornUrl);
+      a.preload = 'auto';
+      a.volume = 1.0;
+      try{
+        a.load();
+        await a.play();
+        await new Promise(res => a.addEventListener('ended', res, { once:true }));
+      }catch(e){
+        break; // autoplay blocked or file missing
+      }
+    }
+  }
+
+  // ===== UI refs =====
+  const phaseEl = document.getElementById('phase');
+  const timeEl  = document.getElementById('time');
+  const setEl   = document.getElementById('set');
+  const workEl  = document.getElementById('workElapsed');
+
+  const minSel  = document.getElementById('minutes');
+  const secSel  = document.getElementById('seconds');
+  const setsSel = document.getElementById('sets');
+
+  const startBtn = document.getElementById('start');
+  const stopBtn  = document.getElementById('stop');
+  const resetBtn = document.getElementById('reset');
+
+  // ===== Dropdowns =====
+  function addOptions(select, values, pad2=false){
+    select.innerHTML = '';
+    for(const v of values){
+      const o = document.createElement('option');
+      o.value = String(v);
+      o.textContent = pad2 ? String(v).padStart(2,'0') : String(v);
+      select.appendChild(o);
+    }
+  }
+
+  addOptions(minSel, Array.from({length:61}, (_,i)=>i));                 // 0-60
+  addOptions(secSel, Array.from({length:12}, (_,i)=>i*5), true);         // 00,05..55
+  addOptions(setsSel, Array.from({length:99}, (_,i)=>i+1));              // 1-99
+
+  minSel.value = '1';
+  secSel.value = '0';
+  setsSel.value = '5';
+
+  // ===== Timer state =====
+  let total = 60;
+  let remain = 60;
+  let sets = 5;
+  let current = 1;
+  let running = false;
+  let intervalId = null;
+  let workElapsedSeconds = 0;
+
+  function fmtMMSS(s){
+    const m = Math.floor(s/60);
+    const r = s%60;
+    return String(m).padStart(2,'0') + ':' + String(r).padStart(2,'0');
+  }
+  function fmtHMS(s){
+    const h = Math.floor(s/3600);
+    const m = Math.floor((s%3600)/60);
+    const r = s%60;
+    return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(r).padStart(2,'0');
+  }
+
+  function readInputs(){
+    const mins = parseInt(minSel.value, 10) || 0;
+    const secs = parseInt(secSel.value, 10) || 0;
+    total = Math.max(1, mins*60 + secs);
+    sets = Math.max(1, parseInt(setsSel.value, 10) || 5);
+    if(current > sets) current = sets;
+  }
+
+  function applyTimeColor(){
+    // green normally, orange <=10, red <=3
+    if(remain <= 3) timeEl.style.color = '#ff2a2a';
+    else if(remain <= 10) timeEl.style.color = '#ffb020';
+    else timeEl.style.color = '#00ff5a';
+  }
+
+  function render(){
+    timeEl.textContent = fmtMMSS(remain);
+    setEl.textContent = `SET ${current} / ${sets}`;
+    workEl.textContent = `WORK TIME: ${fmtHMS(workElapsedSeconds)}`;
+    applyTimeColor();
+
+    startBtn.disabled = running;
+    stopBtn.disabled = !running;
+  }
+
+  function stop(){
+    running = false;
+    if(intervalId) clearInterval(intervalId);
+    intervalId = null;
+    phaseEl.textContent = 'PAUSED';
+    render();
+  }
+
+  function resetAll(){
+    stop();
+    readInputs();
+    current = 1;
+    remain = total;
+    workElapsedSeconds = 0;
+    phaseEl.textContent = 'READY';
+    render();
+  }
+
+  function start(){
+    if(running) return;
+    readInputs();
+    if(remain <= 0) remain = total;
+
+    running = true;
+    phaseEl.textContent = 'WORK';
+    playHorn(1);
+
+    intervalId = setInterval(() => {
+      remain -= 1;
+      workElapsedSeconds += 1;
+
+      if(remain <= 0){
+        remain = 0;
+        render();
+
+        if(current >= sets){
+          // Final set complete: long horn + stop
+          playHorn(2);
+          running = false;
+          if(intervalId) clearInterval(intervalId);
+          intervalId = null;
+          phaseEl.textContent = 'FINISHED';
+          render();
+          return;
+        }
+
+        // End of normal set: horn once, advance
+        playHorn(1);
+        current += 1;
+        remain = total;
+      }
+
+      render();
+    }, 1000);
+
+    render();
+  }
+
+  startBtn.addEventListener('click', start);
+  stopBtn.addEventListener('click', stop);
+  resetBtn.addEventListener('click', resetAll);
+
+  [minSel, secSel, setsSel].forEach(el => {
+    el.addEventListener('change', () => {
+      if(!running){
+        readInputs();
+        remain = total;
+        current = Math.min(current, sets);
+        render();
+      }
+    });
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if(e.code === 'Space'){
+      e.preventDefault();
+      running ? stop() : start();
+    }
+  });
+
+  readInputs();
+  remain = total;
+  render();
+})();
+</script>
+</body>
+</html>
